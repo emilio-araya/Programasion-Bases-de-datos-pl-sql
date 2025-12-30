@@ -1,0 +1,131 @@
+PRUEBA 3  
+parte 1  
+CREAR EL DISPARADOR  
+CREATE OR REPLACE TRIGGER TGR_CONTROL_ATENCION_MEDICA  
+AFTER INSERT OR UPDATE OR DELETE ON BOLETA 
+FOR EACH ROW 
+DECLARE 
+ v_asignacion NUMBER; 
+BEGIN 
+ IF INSERTING THEN 
+ v_asignacion := ROUND(:NEW.monto_boleta * 0.15); 
+ INSERT INTO ASIGNACION_ATEN_MED (nro_boleta, valor_comision) 
+ VALUES (:NEW.nro_boleta, v_asignacion); 
+ ELSIF UPDATING THEN 
+ IF :NEW.monto_boleta > :OLD.monto_boleta THEN 
+ v_asignacion := ROUND(:NEW.monto_boleta * 0.15); 
+ UPDATE ASIGNACION_ATEN_MED 
+ SET valor_comision = v_asignacion 
+ WHERE nro_boleta = :NEW.nro_boleta; 
+ END IF; 
+  
+ ELSIF DELETING THEN 
+ DELETE FROM ASIGNACION_ATEN_MED 
+ WHERE nro_boleta = :OLD.nro_boleta; 
+ END IF; 
+END; 
+PARA USAR EL DISPARADOR  
+BEGIN 
+ INSERT INTO BOLETA (nro_boleta, fecha_boleta, monto_boleta, id_cliente, numrut_emp)  VALUES (28, TO_DATE('26/06/2021', 'DD/MM/YYYY'), 258999, 3000, 12456905); 
+ UPDATE BOLETA 
+ SET monto_boleta = 558590 
+ WHERE nro_boleta = 24; 
+ UPDATE BOLETA 
+ SET monto_boleta = 60000 
+ WHERE nro_boleta = 27; 
+ DELETE FROM BOLETA 
+ WHERE nro_boleta = 22; 
+ COMMIT; 
+END; 
+ PARTE 2 DE LA PRUEBA  
+CRAR LAS FUNCIONES 
+1).FUNCION DE ASIGNACION FARMILIAR 
+CREATE OR REPLACE FUNCTION FN_ASIG_CARGA_FAMILIAR ( 
+ p_numrut_emp IN NUMBER, 
+ p_valor_por_carga IN NUMBER 
+) RETURN NUMBER IS 
+ v_cargas NUMBER; 
+BEGIN 
+ EXECUTE IMMEDIATE 
+ 'SELECT COUNT(*) FROM CARGA_FAMILIAR WHERE numrut_emp = :1' 
+ INTO v_cargas 
+ USING p_numrut_emp; 
+ RETURN v_cargas * p_valor_por_carga; 
+EXCEPTION WHEN OTHERS THEN 
+ RETURN 0; 
+END FN_ASIG_CARGA_FAMILIAR; 
+2).FUNCION ATENCIONES MEDICAS 
+CREATE OR REPLACE FUNCTION FN_ASIG_ATENCIONES_MEDICAS ( 
+ p_mes IN NUMBER, 
+ p_anno IN NUMBER, 
+ p_numrut_emp IN NUMBER
+) RETURN NUMBER IS 
+ v_total NUMBER; 
+BEGIN 
+ EXECUTE IMMEDIATE 
+ 'SELECT NVL(SUM(a.valor_comision),0) 
+ FROM ASIGNACION_ATEN_MED a 
+ JOIN BOLETA b ON a.nro_boleta = b.nro_boleta 
+ WHERE EXTRACT(MONTH FROM b.fecha_boleta)=:1 
+ AND EXTRACT(YEAR FROM b.fecha_boleta)=:2 
+ AND b.numrut_emp = :3' 
+ INTO v_total 
+ USING p_mes, p_anno, p_numrut_emp; 
+ RETURN v_total; 
+EXCEPTION WHEN OTHERS THEN 
+ RETURN 0; 
+END FN_ASIG_ATENCIONES_MEDICAS; 
+PROCEDIMIENTO  
+SP_CALCULAR_HABERES  
+CREATE OR REPLACE PROCEDURE SP_CALCULAR_HABERES ( 
+ p_mes IN NUMBER, 
+ p_anno IN NUMBER, 
+ p_porc_movilizacion IN NUMBER, 
+ p_valor_carga_familiar IN NUMBER, 
+ p_valor_colacion IN NUMBER, 
+ p_extra_no_med_1 IN NUMBER,  
+ p_extra_no_med_2 IN NUMBER  
+) IS 
+BEGIN 
+ EXECUTE IMMEDIATE 'TRUNCATE TABLE HABER_CALC_MES'; 
+  
+ pkg_remuneraciones.v_porc_movilizacion := p_porc_movilizacion;   
+ FOR rec IN ( 
+ SELECT numrut_emp, sueldo_base_emp, id_categoria_emp, id_comuna  FROM EMPLEADO 
+ ) LOOP 
+ DECLARE 
+ v_anos NUMBER := pkg_remuneraciones.calcula_bonif_annos(  rec.numrut_emp, p_mes, p_anno);  v_asig_anos NUMBER := ROUND((rec.sueldo_base_emp +  /* Movilización calculada más abajo */0)  * v_anos); 
+ v_cargas NUMBER := fn_asig_carga_familiar( 
+ rec.numrut_emp, p_valor_carga_familiar);  v_atenciones NUMBER := fn_asig_atenciones_medicas(  p_mes, p_anno, rec.numrut_emp);  v_movil NUMBER := ROUND((rec.sueldo_base_emp +  v_cargas + v_atenciones) 
+ * pkg_remuneraciones.v_porc_movilizacion/100);   
+ v_extra NUMBER := CASE 
+ WHEN rec.id_categoria_emp <> 3 
+ AND rec.id_comuna IN (29, 27, 31) THEN p_extra_no_med_1  WHEN rec.id_categoria_emp <> 3 
+ AND rec.id_comuna IN (35,36,37,38,39,41) THEN p_extra_no_med_2  ELSE 0 
+ END; 
+ v_colacion NUMBER := p_valor_colacion; 
+ v_tot_haberes NUMBER; 
+ BEGIN 
+ v_movil := v_movil + v_extra; 
+ v_tot_haberes := rec.sueldo_base_emp 
+ + v_asig_anos + v_cargas 
+ + v_atenciones + v_movil 
+ + v_colacion; 
+  
+ INSERT INTO HABER_CALC_MES ( 
+ numrut_emp, mes_proceso, anno_proceso, 
+ annos_trabajados, valor_sueldo_base, 
+ valor_asig_annos, valor_cargas_fam, 
+ valor_movilizacion, valor_colacion, 
+ valor_asig_pro, valor_tot_haberes 
+ ) VALUES ( 
+ rec.numrut_emp, p_mes, p_anno, 
+ v_anos, rec.sueldo_base_emp, 
+ v_asig_anos, v_cargas, 
+ v_movil, v_colacion, 
+ v_atenciones, v_tot_haberes 
+ ); 
+ END;
+ END LOOP; 
+ COMMIT; 
+END SP_CALCULAR_HABERES;
